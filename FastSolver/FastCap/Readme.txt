@@ -1,0 +1,1 @@
+to run WireSections_to_FastCap.py first open the PowerShell and navigate where the Wire_Sections.txt that needs to be read. Important thing is the WireSections_to_FastCap.py needs to be in the same folder as the Wire_Sections.txt. Once there type this python wire_sections_to_fastcap.py Wire_Sections.txt coil_cap.txt --width-mm 0.35

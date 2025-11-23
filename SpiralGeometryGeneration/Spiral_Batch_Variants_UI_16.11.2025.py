@@ -269,8 +269,6 @@ class BatchApp(tk.Tk):
         # Internal state
         self._building = False
         self._layer_dirs: List[str] = []
-        self._layer_K_overrides: List[Optional[int]] = []
-        self._layer_N_overrides: List[Optional[float]] = []
         self._extra_layer_configs: List[LayerConfig] = []
         self.var_M.trace_add("write", self._on_layers_changed)
         self._on_layers_changed()
@@ -335,11 +333,6 @@ class BatchApp(tk.Tk):
         ttk.Button(dir_row, text="Set…", command=self._open_layer_dir_dialog).pack(side="left", padx=6)
         ttk.Label(dir_row, textvariable=self.var_layer_dir_summary).pack(side="left", padx=4)
 
-        kn_row = ttk.Frame(adv); kn_row.pack(fill="x", padx=8, pady=3)
-        ttk.Label(kn_row, text="Per-layer K / N overrides:").pack(side="left")
-        ttk.Button(kn_row, text="Set…", command=self._open_layer_kn_dialog).pack(side="left", padx=6)
-        ttk.Label(kn_row, textvariable=self.var_layer_kn_summary).pack(side="left", padx=4)
-
         cfg_row = ttk.Frame(adv); cfg_row.pack(fill="x", padx=8, pady=3)
         ttk.Label(cfg_row, text="Layer configurations (CW/CCW sets):").pack(side="left")
         ttk.Button(cfg_row, text="Manage…", command=self._open_layer_config_manager).pack(side="left", padx=6)
@@ -402,21 +395,6 @@ class BatchApp(tk.Tk):
         for cfg in self._extra_layer_configs:
             cfg.ensure_length(M)
 
-    def _ensure_layer_kn_length(self, M: int):
-        M = max(0, int(M))
-        k_list = list(self._layer_K_overrides)
-        n_list = list(self._layer_N_overrides)
-        if len(k_list) < M:
-            k_list.extend([None] * (M - len(k_list)))
-        else:
-            k_list = k_list[:M]
-        if len(n_list) < M:
-            n_list.extend([None] * (M - len(n_list)))
-        else:
-            n_list = n_list[:M]
-        self._layer_K_overrides = k_list
-        self._layer_N_overrides = n_list
-
     def _format_layer_dir_summary(self) -> str:
         if not self._layer_dirs:
             return "All layers: CCW"
@@ -426,21 +404,6 @@ class BatchApp(tk.Tk):
             return f"All layers: {val}"
         preview = ", ".join(f"L{idx}:{val}" for idx, val in enumerate(self._layer_dirs))
         return f"Layer dirs → {preview}"
-
-    def _format_layer_kn_summary(self) -> str:
-        if not self._layer_K_overrides and not self._layer_N_overrides:
-            return "Using sweep K/N"
-        parts = []
-        for idx, (k, n) in enumerate(zip(self._layer_K_overrides, self._layer_N_overrides)):
-            if k is None and n is None:
-                continue
-            tag = f"L{idx}:"
-            if k is not None:
-                tag += f"K={k}"
-            if n is not None:
-                tag += (" " if k is not None else "") + f"N={n}"
-            parts.append(tag)
-        return "Overrides → " + ("; ".join(parts) if parts else "Using sweep K/N")
 
     def _format_cfg_summary(self) -> str:
         total = 1 + len(self._extra_layer_configs)
@@ -502,83 +465,6 @@ class BatchApp(tk.Tk):
 
         ttk.Button(btns, text="Cancel", command=dlg.destroy).grid(row=0, column=0, sticky="e", padx=4)
         ttk.Button(btns, text="OK", command=_apply_and_close).grid(row=0, column=1, sticky="w", padx=4)
-
-    def _open_layer_kn_dialog(self):
-        try:
-            M = int(self.var_M.get())
-        except Exception:
-            messagebox.showerror("Per-layer K/N", "Please enter a valid M value first.")
-            return
-        if M <= 0:
-            messagebox.showerror("Per-layer K/N", "Layer count must be ≥ 1.")
-            return
-
-        self._ensure_layer_kn_length(M)
-
-        dlg = tk.Toplevel(self)
-        dlg.title("Per-layer K / N overrides")
-        dlg.transient(self)
-        dlg.grab_set()
-
-        frame = ttk.Frame(dlg)
-        frame.pack(fill="both", expand=True, padx=10, pady=10)
-
-        header = ttk.Frame(frame)
-        header.pack(fill="x", pady=(0,6))
-        ttk.Label(header, text="Layer", width=8).pack(side="left")
-        ttk.Label(header, text="K override (blank = sweep K)", width=26, anchor="w").pack(side="left")
-        ttk.Label(header, text="N override (blank = sweep N)", width=26, anchor="w").pack(side="left", padx=(6,0))
-
-        k_vars: List[tk.StringVar] = []
-        n_vars: List[tk.StringVar] = []
-        for idx in range(M):
-            row = ttk.Frame(frame)
-            row.pack(fill="x", pady=2)
-            ttk.Label(row, text=f"L{idx}", width=8).pack(side="left")
-            kv = tk.StringVar(value="" if self._layer_K_overrides[idx] is None else str(self._layer_K_overrides[idx]))
-            nv = tk.StringVar(value="" if self._layer_N_overrides[idx] is None else str(self._layer_N_overrides[idx]))
-            k_vars.append(kv); n_vars.append(nv)
-            ttk.Entry(row, textvariable=kv, width=14).pack(side="left", padx=(0,6))
-            ttk.Entry(row, textvariable=nv, width=16).pack(side="left")
-
-        btns = ttk.Frame(frame)
-        btns.pack(fill="x", pady=(8,0))
-
-        def _apply():
-            new_k: List[Optional[int]] = []
-            new_n: List[Optional[float]] = []
-            for idx in range(M):
-                k_raw = k_vars[idx].get().strip()
-                n_raw = n_vars[idx].get().strip()
-                if k_raw:
-                    try:
-                        kval = int(k_raw)
-                        if kval <= 0:
-                            raise ValueError
-                        new_k.append(kval)
-                    except Exception:
-                        messagebox.showerror("Per-layer K", f"Layer {idx}: K must be a positive integer.", parent=dlg)
-                        return
-                else:
-                    new_k.append(None)
-                if n_raw:
-                    try:
-                        nval = float(n_raw)
-                        if nval <= 0:
-                            raise ValueError
-                        new_n.append(nval)
-                    except Exception:
-                        messagebox.showerror("Per-layer N", f"Layer {idx}: N must be a positive number.", parent=dlg)
-                        return
-                else:
-                    new_n.append(None)
-            self._layer_K_overrides = new_k
-            self._layer_N_overrides = new_n
-            self.var_layer_kn_summary.set(self._format_layer_kn_summary())
-            dlg.destroy()
-
-        ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side="left", padx=4)
-        ttk.Button(btns, text="Apply", command=_apply).pack(side="right", padx=4)
 
     # ---------------- Helpers ----------------
 
@@ -684,18 +570,6 @@ class BatchApp(tk.Tk):
             raise ValueError("Header fields: vol_res>0, coil_res>0, margin>=0.")
 
         self._ensure_layer_dir_length(M)
-        self._ensure_layer_kn_length(M)
-
-        for idx, kval in enumerate(self._layer_K_overrides):
-            if kval is not None and (not isinstance(kval, int) or kval <= 0):
-                raise ValueError(f"Layer {idx}: K override must be a positive integer or blank.")
-        for idx, nval in enumerate(self._layer_N_overrides):
-            if nval is not None:
-                try:
-                    if float(nval) <= 0:
-                        raise ValueError
-                except Exception:
-                    raise ValueError(f"Layer {idx}: N override must be a positive number or blank.")
 
         return dict(
             Dout=Dout,
@@ -711,8 +585,6 @@ class BatchApp(tk.Tk):
             coil_res=cr,
             margin=mg,
             layer_dirs=list(self._layer_dirs),
-            layer_K_overrides=list(self._layer_K_overrides),
-            layer_N_overrides=list(self._layer_N_overrides),
         )
 
     # ---------------- Main action ----------------
@@ -782,8 +654,6 @@ class BatchApp(tk.Tk):
                     dz_mm   = fx["dz"],
                     layer_gaps_mm = fx["dz_list"],
                     layer_dirs = cfg.dirs,
-                    layer_K_overrides = fx["layer_K_overrides"],
-                    layer_N_overrides = fx["layer_N_overrides"],
                     base_phase_deg     = fx["base"],
                     twist_per_layer_deg= fx["tw"],
                     pts_per_turn       = fx["pts"],

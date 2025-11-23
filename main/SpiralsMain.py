@@ -21,7 +21,6 @@ from tkinter import ttk, filedialog, messagebox
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SPIRAL_UI = REPO_ROOT / "SpiralGeometryGeneration" / "Spiral_Batch_Variants_UI_16.11.2025.py"
-SPIRAL_DRAWER = REPO_ROOT / "SpiralGeometryGeneration" / "Spiral_Drawer_updated.py"
 FAST_UI = REPO_ROOT / "FastSolver" / "Automation" / "fast_solver_batch_ui.py"
 AUTOMATE = REPO_ROOT / "FastSolver" / "Automation" / "automate_solvers.py"
 PLOT_GEN = REPO_ROOT / "FastSolver" / "PlotGeneration" / "PlotGeneration.py"
@@ -271,18 +270,8 @@ class MainApp(tk.Tk):
     def _build_ui(self):
         top = ttk.LabelFrame(self, text="1) Geometry generation")
         top.pack(fill="x", padx=10, pady=8)
-        ttk.Label(
-            top,
-            text=(
-                "Use the batch UI for K/N sweep generation or open the single-builder "
-                "to tweak per-layer arms/turns alongside chirality."
-            ),
-        ).pack(side="left", padx=6)
-
-        btns = ttk.Frame(top)
-        btns.pack(side="right")
-        ttk.Button(btns, text="Open batch generator", command=self._launch_spiral_ui).pack(side="top", padx=6, pady=2)
-        ttk.Button(btns, text="Open per-layer builder", command=self._launch_spiral_drawer).pack(side="top", padx=6, pady=2)
+        ttk.Label(top, text="Use the existing batch UI to generate spirals and Address.txt").pack(side="left", padx=6)
+        ttk.Button(top, text="Open generator", command=self._launch_spiral_ui).pack(side="right", padx=6)
 
         mid = ttk.LabelFrame(self, text="2) Address & solver setup")
         mid.pack(fill="x", padx=10, pady=8)
@@ -313,17 +302,6 @@ class MainApp(tk.Tk):
             return
         subprocess.Popen([sys.executable, str(SPIRAL_UI)])
         self.log.insert("end", "Launched spiral generator UI.\n")
-        self.log.see("end")
-
-    def _launch_spiral_drawer(self):
-        if not SPIRAL_DRAWER.exists():
-            messagebox.showerror("Missing script", f"Cannot find {SPIRAL_DRAWER}")
-            return
-        subprocess.Popen([sys.executable, str(SPIRAL_DRAWER)])
-        self.log.insert(
-            "end",
-            "Opened per-layer builder (supports arm/turn overrides + chirality).\n",
-        )
         self.log.see("end")
 
     def _browse_address(self):

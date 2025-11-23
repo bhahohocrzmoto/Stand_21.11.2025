@@ -170,6 +170,24 @@ def verify_address_file(mother: Path, expected: List[Path], filename: str = "Add
     return True, "All generated folders are present in Address.txt."
 
 
+def verify_address_file(mother: Path, expected: List[Path], filename: str = "Address.txt") -> Tuple[bool, str]:
+    """Confirm Address.txt exists and matches the generated folders."""
+    addr_path = mother / filename
+    if not addr_path.is_file():
+        return False, "Address.txt was not written."
+    lines = [Path(line.strip()) for line in addr_path.read_text().splitlines() if line.strip()]
+    expected_resolved = [p.resolve() for p in expected]
+    if len(lines) != len(expected_resolved):
+        return False, "Address.txt entry count does not match generated folders."
+    missing = [p for p in lines if not p.exists()]
+    if missing:
+        return False, f"Missing folders listed in Address.txt: {', '.join(str(m) for m in missing)}"
+    mismatch = set(lines) ^ set(expected_resolved)
+    if mismatch:
+        return False, "Address.txt entries differ from generated folders."
+    return True, "All generated folders are present in Address.txt."
+
+
 # ------------------------------------------------------------------------------
 # 2) Dynamic import helper — load Spiral_Drawer_updated.py cleanly if needed
 # ------------------------------------------------------------------------------
@@ -269,8 +287,6 @@ class BatchApp(tk.Tk):
         # Internal state
         self._building = False
         self._layer_dirs: List[str] = []
-        self._layer_K_overrides: List[Optional[int]] = []
-        self._layer_N_overrides: List[Optional[float]] = []
         self._extra_layer_configs: List[LayerConfig] = []
         self.var_M.trace_add("write", self._on_layers_changed)
         self._on_layers_changed()
@@ -346,6 +362,12 @@ class BatchApp(tk.Tk):
         self.var_cfg_summary = tk.StringVar(value="Using 1 configuration")
         ttk.Label(cfg_row, textvariable=self.var_cfg_summary).pack(side="left", padx=4)
 
+        cfg_row = ttk.Frame(adv); cfg_row.pack(fill="x", padx=8, pady=3)
+        ttk.Label(cfg_row, text="Layer configurations (CW/CCW sets):").pack(side="left")
+        ttk.Button(cfg_row, text="Manage…", command=self._open_layer_config_manager).pack(side="left", padx=6)
+        self.var_cfg_summary = tk.StringVar(value="Using 1 configuration")
+        ttk.Label(cfg_row, textvariable=self.var_cfg_summary).pack(side="left", padx=4)
+
         g2 = ttk.Frame(adv); g2.pack(fill="x", padx=8, pady=3)
         ttk.Label(g2, text="Base phase [deg]").pack(side="left")
         ttk.Entry(g2, textvariable=self.var_base, width=8).pack(side="left", padx=6)
@@ -402,21 +424,6 @@ class BatchApp(tk.Tk):
         for cfg in self._extra_layer_configs:
             cfg.ensure_length(M)
 
-    def _ensure_layer_kn_length(self, M: int):
-        M = max(0, int(M))
-        k_list = list(self._layer_K_overrides)
-        n_list = list(self._layer_N_overrides)
-        if len(k_list) < M:
-            k_list.extend([None] * (M - len(k_list)))
-        else:
-            k_list = k_list[:M]
-        if len(n_list) < M:
-            n_list.extend([None] * (M - len(n_list)))
-        else:
-            n_list = n_list[:M]
-        self._layer_K_overrides = k_list
-        self._layer_N_overrides = n_list
-
     def _format_layer_dir_summary(self) -> str:
         if not self._layer_dirs:
             return "All layers: CCW"
@@ -441,6 +448,12 @@ class BatchApp(tk.Tk):
                 tag += (" " if k is not None else "") + f"N={n}"
             parts.append(tag)
         return "Overrides → " + ("; ".join(parts) if parts else "Using sweep K/N")
+
+    def _format_cfg_summary(self) -> str:
+        total = 1 + len(self._extra_layer_configs)
+        names = [cfg.name for cfg in self._extra_layer_configs]
+        suffix = f" (+ {', '.join(names)})" if names else ""
+        return f"Using {total} configuration(s){suffix}"
 
     def _format_cfg_summary(self) -> str:
         total = 1 + len(self._extra_layer_configs)
@@ -503,89 +516,31 @@ class BatchApp(tk.Tk):
         ttk.Button(btns, text="Cancel", command=dlg.destroy).grid(row=0, column=0, sticky="e", padx=4)
         ttk.Button(btns, text="OK", command=_apply_and_close).grid(row=0, column=1, sticky="w", padx=4)
 
-    def _open_layer_kn_dialog(self):
-        try:
-            M = int(self.var_M.get())
-        except Exception:
-            messagebox.showerror("Per-layer K/N", "Please enter a valid M value first.")
-            return
-        if M <= 0:
-            messagebox.showerror("Per-layer K/N", "Layer count must be ≥ 1.")
-            return
-
-        self._ensure_layer_kn_length(M)
-
-        dlg = tk.Toplevel(self)
-        dlg.title("Per-layer K / N overrides")
-        dlg.transient(self)
-        dlg.grab_set()
-
-        frame = ttk.Frame(dlg)
-        frame.pack(fill="both", expand=True, padx=10, pady=10)
-
-        header = ttk.Frame(frame)
-        header.pack(fill="x", pady=(0,6))
-        ttk.Label(header, text="Layer", width=8).pack(side="left")
-        ttk.Label(header, text="K override (blank = sweep K)", width=26, anchor="w").pack(side="left")
-        ttk.Label(header, text="N override (blank = sweep N)", width=26, anchor="w").pack(side="left", padx=(6,0))
-
-        k_vars: List[tk.StringVar] = []
-        n_vars: List[tk.StringVar] = []
-        for idx in range(M):
-            row = ttk.Frame(frame)
-            row.pack(fill="x", pady=2)
-            ttk.Label(row, text=f"L{idx}", width=8).pack(side="left")
-            kv = tk.StringVar(value="" if self._layer_K_overrides[idx] is None else str(self._layer_K_overrides[idx]))
-            nv = tk.StringVar(value="" if self._layer_N_overrides[idx] is None else str(self._layer_N_overrides[idx]))
-            k_vars.append(kv); n_vars.append(nv)
-            ttk.Entry(row, textvariable=kv, width=14).pack(side="left", padx=(0,6))
-            ttk.Entry(row, textvariable=nv, width=16).pack(side="left")
-
-        btns = ttk.Frame(frame)
-        btns.pack(fill="x", pady=(8,0))
-
-        def _apply():
-            new_k: List[Optional[int]] = []
-            new_n: List[Optional[float]] = []
-            for idx in range(M):
-                k_raw = k_vars[idx].get().strip()
-                n_raw = n_vars[idx].get().strip()
-                if k_raw:
-                    try:
-                        kval = int(k_raw)
-                        if kval <= 0:
-                            raise ValueError
-                        new_k.append(kval)
-                    except Exception:
-                        messagebox.showerror("Per-layer K", f"Layer {idx}: K must be a positive integer.", parent=dlg)
-                        return
-                else:
-                    new_k.append(None)
-                if n_raw:
-                    try:
-                        nval = float(n_raw)
-                        if nval <= 0:
-                            raise ValueError
-                        new_n.append(nval)
-                    except Exception:
-                        messagebox.showerror("Per-layer N", f"Layer {idx}: N must be a positive number.", parent=dlg)
-                        return
-                else:
-                    new_n.append(None)
-            self._layer_K_overrides = new_k
-            self._layer_N_overrides = new_n
-            self.var_layer_kn_summary.set(self._format_layer_kn_summary())
-            dlg.destroy()
-
-        ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side="left", padx=4)
-        ttk.Button(btns, text="Apply", command=_apply).pack(side="right", padx=4)
-
     # ---------------- Helpers ----------------
 
     def _log(self, msg: str):
         self.txt.insert("end", msg + "\n")
         self.txt.see("end")
         self.update_idletasks()
+
+    def _add_layer_config(self, cfg: "LayerConfig"):
+        self._extra_layer_configs.append(cfg)
+        self.var_cfg_summary.set(self._format_cfg_summary())
+
+    def _remove_layer_config(self, cfg: "LayerConfig"):
+        self._extra_layer_configs = [c for c in self._extra_layer_configs if c is not cfg]
+        self.var_cfg_summary.set(self._format_cfg_summary())
+
+    def _get_all_configs(self, m_layers: int) -> List["LayerConfig"]:
+        # Default config mirrors the main layer_dirs values
+        base = LayerConfig(name="Default", dirs=list(self._layer_dirs), apply_all=True)
+        base.ensure_length(m_layers)
+        configs = [base]
+        for cfg in self._extra_layer_configs:
+            clone = cfg.copy()
+            clone.ensure_length(m_layers)
+            configs.append(clone)
+        return configs
 
     def _add_layer_config(self, cfg: "LayerConfig"):
         self._extra_layer_configs.append(cfg)
@@ -782,8 +737,6 @@ class BatchApp(tk.Tk):
                     dz_mm   = fx["dz"],
                     layer_gaps_mm = fx["dz_list"],
                     layer_dirs = cfg.dirs,
-                    layer_K_overrides = fx["layer_K_overrides"],
-                    layer_N_overrides = fx["layer_N_overrides"],
                     base_phase_deg     = fx["base"],
                     twist_per_layer_deg= fx["tw"],
                     pts_per_turn       = fx["pts"],

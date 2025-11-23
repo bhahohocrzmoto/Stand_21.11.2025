@@ -252,6 +252,7 @@ class BatchApp(tk.Tk):
         self.var_base = tk.StringVar(value="0.0")
         self.var_twist= tk.StringVar(value="0.0")
         self.var_layer_dir_summary = tk.StringVar(value="All layers: CCW")
+        self.var_layer_kn_summary = tk.StringVar(value="Using sweep K/N")
 
         # Sampling density — take the constant from the original module if present
         default_pts = getattr(self.SDU, "PTS_PER_TURN", 50)
@@ -379,7 +380,9 @@ class BatchApp(tk.Tk):
         except Exception:
             M = 0
         self._ensure_layer_dir_length(M)
+        self._ensure_layer_kn_length(M)
         self.var_layer_dir_summary.set(self._format_layer_dir_summary())
+        self.var_layer_kn_summary.set(self._format_layer_kn_summary())
 
     def _ensure_layer_dir_length(self, M: int):
         M = max(0, int(M))

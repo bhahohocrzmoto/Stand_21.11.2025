@@ -278,7 +278,13 @@ def compute_current_pattern(port_def: Dict[str, object], n: int) -> np.ndarray:
     return pattern
 
 
-def interactive_ports_config(config_path: Path, n: int) -> Dict[str, Dict[str, object]]:
+def interactive_ports_config(
+    config_path: Path,
+    n: int,
+    *,
+    preconfigured: Optional[Dict[str, Dict[str, object]]] = None,
+    auto_reuse: bool = False,
+) -> Dict[str, Dict[str, object]]:
     existing: Dict[str, Dict[str, object]] = {}
     if config_path.exists():
         try:
@@ -286,6 +292,11 @@ def interactive_ports_config(config_path: Path, n: int) -> Dict[str, Dict[str, o
         except Exception as exc:  # noqa: BLE001
             print(f"Failed to load existing ports_config.json: {exc}")
             existing = {}
+    if preconfigured is not None:
+        config_path.write_text(json.dumps({"ports": preconfigured}, indent=2))
+        return preconfigured
+    if auto_reuse and existing:
+        return existing.get("ports", {})
     if existing:
         reuse = input("Ports configuration found. Reuse? [Y/n]: ").strip().lower()
         if reuse in ("", "y", "yes"):
@@ -436,7 +447,13 @@ def plot_vs_frequency(freq: np.ndarray, values: np.ndarray, ylabel: str, title: 
     plt.close()
 
 
-def process_spiral(spiral_path: Path, global_records: List[Dict[str, object]]) -> None:
+def process_spiral(
+    spiral_path: Path,
+    global_records: List[Dict[str, object]],
+    *,
+    ports_override: Optional[Dict[str, Dict[str, object]]] = None,
+    auto_reuse_ports: bool = False,
+) -> None:
     spiral_name = spiral_path.name
     fastsolver = spiral_path / "FastSolver"
     if not fastsolver.exists():
@@ -459,7 +476,12 @@ def process_spiral(spiral_path: Path, global_records: List[Dict[str, object]]) -
         print(f"Dimension mismatch for {spiral_name}, skipping.")
         return
     save_matrix_csv(C, dirs["matrices"] / "C_matrix.csv")
-    ports = interactive_ports_config(dirs["ports_config"], n)
+    ports = interactive_ports_config(
+        dirs["ports_config"],
+        n,
+        preconfigured=ports_override,
+        auto_reuse=auto_reuse_ports,
+    )
     if not ports:
         print(f"No ports defined for {spiral_name}, skipping.")
         return

@@ -13,7 +13,6 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-import threading
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -22,7 +21,6 @@ from tkinter import ttk, filedialog, messagebox
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SPIRAL_UI = REPO_ROOT / "SpiralGeometryGeneration" / "Spiral_Batch_Variants_UI_16.11.2025.py"
-SPIRAL_DRAWER = REPO_ROOT / "SpiralGeometryGeneration" / "Spiral_Drawer_updated.py"
 FAST_UI = REPO_ROOT / "FastSolver" / "Automation" / "fast_solver_batch_ui.py"
 AUTOMATE = REPO_ROOT / "FastSolver" / "Automation" / "automate_solvers.py"
 PLOT_GEN = REPO_ROOT / "FastSolver" / "PlotGeneration" / "PlotGeneration.py"
@@ -272,18 +270,8 @@ class MainApp(tk.Tk):
     def _build_ui(self):
         top = ttk.LabelFrame(self, text="1) Geometry generation")
         top.pack(fill="x", padx=10, pady=8)
-        ttk.Label(
-            top,
-            text=(
-                "Use the batch UI for K/N sweep generation or open the single-builder "
-                "to tweak per-layer arms/turns alongside chirality."
-            ),
-        ).pack(side="left", padx=6)
-
-        btns = ttk.Frame(top)
-        btns.pack(side="right")
-        ttk.Button(btns, text="Open batch generator", command=self._launch_spiral_ui).pack(side="top", padx=6, pady=2)
-        ttk.Button(btns, text="Open per-layer builder", command=self._launch_spiral_drawer).pack(side="top", padx=6, pady=2)
+        ttk.Label(top, text="Use the existing batch UI to generate spirals and Address.txt").pack(side="left", padx=6)
+        ttk.Button(top, text="Open generator", command=self._launch_spiral_ui).pack(side="right", padx=6)
 
         mid = ttk.LabelFrame(self, text="2) Address & solver setup")
         mid.pack(fill="x", padx=10, pady=8)
@@ -309,72 +297,11 @@ class MainApp(tk.Tk):
         self.log.pack(fill="both", expand=True)
 
     def _launch_spiral_ui(self):
-        self._launch_script(SPIRAL_UI, "Launched spiral generator UI.")
-
-    def _launch_spiral_drawer(self):
-        self._launch_script(
-            SPIRAL_DRAWER,
-            "Opened per-layer builder (supports arm/turn overrides + chirality).",
-        )
-
-    def _launch_script(self, script: Path, success_message: str):
-        if not script.exists():
-            messagebox.showerror("Missing script", f"Cannot find {script}")
+        if not SPIRAL_UI.exists():
+            messagebox.showerror("Missing script", f"Cannot find {SPIRAL_UI}")
             return
-        try:
-            proc = subprocess.Popen(
-                [sys.executable, str(script)],
-                cwd=script.parent,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-        except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("Launch failed", f"Could not start {script.name}: {exc}")
-            return
-
-        self.log.insert("end", success_message + "\n")
-        self.log.see("end")
-
-        # Stream output to the log so early import errors are visible and always report exit codes.
-        self._stream_process_output(proc, script.name)
-        threading.Thread(
-            target=self._wait_and_report_exit, args=(proc, script), daemon=True
-        ).start()
-
-    def _stream_process_output(self, proc: subprocess.Popen, label: str) -> None:
-        def pump(stream, prefix):
-            if not stream:
-                return
-            for line in iter(stream.readline, ""):
-                if not line:
-                    break
-                self.after(0, lambda txt=f"[{label}] {prefix}{line}": self._append_log(txt))
-
-        threading.Thread(target=pump, args=(proc.stdout, ""), daemon=True).start()
-        threading.Thread(target=pump, args=(proc.stderr, "! "), daemon=True).start()
-
-    def _wait_and_report_exit(self, proc: subprocess.Popen, script: Path) -> None:
-        code = proc.wait()
-        self.after(
-            0,
-            lambda: self._append_log(
-                f"{script.name} exited with code {code}. Check above for details.\n"
-            ),
-        )
-        if code != 0:
-            self.after(
-                0,
-                lambda: messagebox.showerror(
-                    "Launch failed",
-                    f"{script.name} closed unexpectedly (code {code}). See log for details.",
-                ),
-            )
-
-    def _append_log(self, text: str) -> None:
-        self.log.insert("end", text)
-        if not text.endswith("\n"):
-            self.log.insert("end", "\n")
+        subprocess.Popen([sys.executable, str(SPIRAL_UI)])
+        self.log.insert("end", "Launched spiral generator UI.\n")
         self.log.see("end")
 
     def _browse_address(self):

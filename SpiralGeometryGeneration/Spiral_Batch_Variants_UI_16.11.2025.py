@@ -36,14 +36,37 @@ import importlib.util
 import math
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal, getcontext
 from pathlib import Path
 from typing import List, Tuple, Optional
 
 # --- GUI ---
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, simpledialog
+
+
+@dataclass
+class LayerConfig:
+    name: str
+    dirs: List[str]
+    apply_all: bool = True
+    combo_filter: Optional[set[Tuple[int, float]]] = field(default=None)
+
+    def ensure_length(self, M: int):
+        M = max(0, int(M))
+        dirs = list(self.dirs)
+        if len(dirs) < M:
+            dirs.extend(["CCW"] * (M - len(dirs)))
+        self.dirs = dirs[:M]
+
+    def copy(self) -> "LayerConfig":
+        return LayerConfig(
+            name=self.name,
+            dirs=list(self.dirs),
+            apply_all=self.apply_all,
+            combo_filter=set(self.combo_filter) if self.combo_filter else None,
+        )
 
 # ------------------------------------------------------------------------------
 # 1) Utilities for robust floating sweeps and safe folder names
@@ -72,14 +95,28 @@ def frange(start: float, stop: float, step: float) -> List[float]:
     return vals
 
 
-def safe_combo_folder_name(K: int, N: float, fmt: str) -> str:
+def sanitize_token(token: str) -> str:
+    """Remove characters that would make folder names noisy."""
+    cleaned = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in token)
+    return cleaned.strip("_") or "cfg"
+
+
+def layer_label(m_layers: int, dirs: List[str], cfg_name: str | None = None) -> str:
+    base = f"L{m_layers}_" + "_".join(dirs or ["CCW"])
+    if cfg_name:
+        base += f"_{sanitize_token(cfg_name)}"
+    return base
+
+
+def safe_combo_folder_name(K: int, N: float, fmt: str, m_layers: int, dirs: List[str], cfg_name: str | None = None) -> str:
     """
-    Builds a subfolder name from K and N.
+    Builds a subfolder name from K, N, and layer metadata.
     - fmt is a Python format for N (e.g., ".3f" means 3 decimals).
-    - Keep it simple and OS-safe. Periods are allowed; nothing fancy needed.
+    - Folder names now also encode layer count + chirality (and optional config label)
+      so that different layer direction sets produce unique outputs.
     """
     n_str = format(N, fmt)
-    return f"K{K}_N{n_str}"
+    return f"K{K}_N{n_str}_{layer_label(m_layers, dirs, cfg_name)}"
 
 
 # NEW HELPER: write Address.txt in the mother folder
@@ -113,6 +150,24 @@ def write_address_file(mother: Path, subfolders: List[Path], filename: str = "Ad
     with addr_path.open("w", encoding="utf-8") as f:
         for folder in subfolders:
             f.write(str(folder.resolve()) + os.linesep)
+
+
+def verify_address_file(mother: Path, expected: List[Path], filename: str = "Address.txt") -> Tuple[bool, str]:
+    """Confirm Address.txt exists and matches the generated folders."""
+    addr_path = mother / filename
+    if not addr_path.is_file():
+        return False, "Address.txt was not written."
+    lines = [Path(line.strip()) for line in addr_path.read_text().splitlines() if line.strip()]
+    expected_resolved = [p.resolve() for p in expected]
+    if len(lines) != len(expected_resolved):
+        return False, "Address.txt entry count does not match generated folders."
+    missing = [p for p in lines if not p.exists()]
+    if missing:
+        return False, f"Missing folders listed in Address.txt: {', '.join(str(m) for m in missing)}"
+    mismatch = set(lines) ^ set(expected_resolved)
+    if mismatch:
+        return False, "Address.txt entries differ from generated folders."
+    return True, "All generated folders are present in Address.txt."
 
 
 # ------------------------------------------------------------------------------
@@ -197,6 +252,7 @@ class BatchApp(tk.Tk):
         self.var_base = tk.StringVar(value="0.0")
         self.var_twist= tk.StringVar(value="0.0")
         self.var_layer_dir_summary = tk.StringVar(value="All layers: CCW")
+        self.var_layer_kn_summary = tk.StringVar(value="Using sweep K/N")
 
         # Sampling density — take the constant from the original module if present
         default_pts = getattr(self.SDU, "PTS_PER_TURN", 50)
@@ -213,6 +269,9 @@ class BatchApp(tk.Tk):
         # Internal state
         self._building = False
         self._layer_dirs: List[str] = []
+        self._layer_K_overrides: List[Optional[int]] = []
+        self._layer_N_overrides: List[Optional[float]] = []
+        self._extra_layer_configs: List[LayerConfig] = []
         self.var_M.trace_add("write", self._on_layers_changed)
         self._on_layers_changed()
 
@@ -276,6 +335,17 @@ class BatchApp(tk.Tk):
         ttk.Button(dir_row, text="Set…", command=self._open_layer_dir_dialog).pack(side="left", padx=6)
         ttk.Label(dir_row, textvariable=self.var_layer_dir_summary).pack(side="left", padx=4)
 
+        kn_row = ttk.Frame(adv); kn_row.pack(fill="x", padx=8, pady=3)
+        ttk.Label(kn_row, text="Per-layer K / N overrides:").pack(side="left")
+        ttk.Button(kn_row, text="Set…", command=self._open_layer_kn_dialog).pack(side="left", padx=6)
+        ttk.Label(kn_row, textvariable=self.var_layer_kn_summary).pack(side="left", padx=4)
+
+        cfg_row = ttk.Frame(adv); cfg_row.pack(fill="x", padx=8, pady=3)
+        ttk.Label(cfg_row, text="Layer configurations (CW/CCW sets):").pack(side="left")
+        ttk.Button(cfg_row, text="Manage…", command=self._open_layer_config_manager).pack(side="left", padx=6)
+        self.var_cfg_summary = tk.StringVar(value="Using 1 configuration")
+        ttk.Label(cfg_row, textvariable=self.var_cfg_summary).pack(side="left", padx=4)
+
         g2 = ttk.Frame(adv); g2.pack(fill="x", padx=8, pady=3)
         ttk.Label(g2, text="Base phase [deg]").pack(side="left")
         ttk.Entry(g2, textvariable=self.var_base, width=8).pack(side="left", padx=6)
@@ -317,7 +387,9 @@ class BatchApp(tk.Tk):
         except Exception:
             M = 0
         self._ensure_layer_dir_length(M)
+        self._ensure_layer_kn_length(M)
         self.var_layer_dir_summary.set(self._format_layer_dir_summary())
+        self.var_layer_kn_summary.set(self._format_layer_kn_summary())
 
     def _ensure_layer_dir_length(self, M: int):
         M = max(0, int(M))
@@ -327,6 +399,23 @@ class BatchApp(tk.Tk):
         else:
             cur = cur[:M]
         self._layer_dirs = cur
+        for cfg in self._extra_layer_configs:
+            cfg.ensure_length(M)
+
+    def _ensure_layer_kn_length(self, M: int):
+        M = max(0, int(M))
+        k_list = list(self._layer_K_overrides)
+        n_list = list(self._layer_N_overrides)
+        if len(k_list) < M:
+            k_list.extend([None] * (M - len(k_list)))
+        else:
+            k_list = k_list[:M]
+        if len(n_list) < M:
+            n_list.extend([None] * (M - len(n_list)))
+        else:
+            n_list = n_list[:M]
+        self._layer_K_overrides = k_list
+        self._layer_N_overrides = n_list
 
     def _format_layer_dir_summary(self) -> str:
         if not self._layer_dirs:
@@ -337,6 +426,27 @@ class BatchApp(tk.Tk):
             return f"All layers: {val}"
         preview = ", ".join(f"L{idx}:{val}" for idx, val in enumerate(self._layer_dirs))
         return f"Layer dirs → {preview}"
+
+    def _format_layer_kn_summary(self) -> str:
+        if not self._layer_K_overrides and not self._layer_N_overrides:
+            return "Using sweep K/N"
+        parts = []
+        for idx, (k, n) in enumerate(zip(self._layer_K_overrides, self._layer_N_overrides)):
+            if k is None and n is None:
+                continue
+            tag = f"L{idx}:"
+            if k is not None:
+                tag += f"K={k}"
+            if n is not None:
+                tag += (" " if k is not None else "") + f"N={n}"
+            parts.append(tag)
+        return "Overrides → " + ("; ".join(parts) if parts else "Using sweep K/N")
+
+    def _format_cfg_summary(self) -> str:
+        total = 1 + len(self._extra_layer_configs)
+        names = [cfg.name for cfg in self._extra_layer_configs]
+        suffix = f" (+ {', '.join(names)})" if names else ""
+        return f"Using {total} configuration(s){suffix}"
 
     def _open_layer_dir_dialog(self):
         try:
@@ -387,10 +497,88 @@ class BatchApp(tk.Tk):
         def _apply_and_close():
             self._layer_dirs = [var.get() for var in choice_vars]
             self.var_layer_dir_summary.set(self._format_layer_dir_summary())
+            self.var_cfg_summary.set(self._format_cfg_summary())
             dlg.destroy()
 
         ttk.Button(btns, text="Cancel", command=dlg.destroy).grid(row=0, column=0, sticky="e", padx=4)
         ttk.Button(btns, text="OK", command=_apply_and_close).grid(row=0, column=1, sticky="w", padx=4)
+
+    def _open_layer_kn_dialog(self):
+        try:
+            M = int(self.var_M.get())
+        except Exception:
+            messagebox.showerror("Per-layer K/N", "Please enter a valid M value first.")
+            return
+        if M <= 0:
+            messagebox.showerror("Per-layer K/N", "Layer count must be ≥ 1.")
+            return
+
+        self._ensure_layer_kn_length(M)
+
+        dlg = tk.Toplevel(self)
+        dlg.title("Per-layer K / N overrides")
+        dlg.transient(self)
+        dlg.grab_set()
+
+        frame = ttk.Frame(dlg)
+        frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+        header = ttk.Frame(frame)
+        header.pack(fill="x", pady=(0,6))
+        ttk.Label(header, text="Layer", width=8).pack(side="left")
+        ttk.Label(header, text="K override (blank = sweep K)", width=26, anchor="w").pack(side="left")
+        ttk.Label(header, text="N override (blank = sweep N)", width=26, anchor="w").pack(side="left", padx=(6,0))
+
+        k_vars: List[tk.StringVar] = []
+        n_vars: List[tk.StringVar] = []
+        for idx in range(M):
+            row = ttk.Frame(frame)
+            row.pack(fill="x", pady=2)
+            ttk.Label(row, text=f"L{idx}", width=8).pack(side="left")
+            kv = tk.StringVar(value="" if self._layer_K_overrides[idx] is None else str(self._layer_K_overrides[idx]))
+            nv = tk.StringVar(value="" if self._layer_N_overrides[idx] is None else str(self._layer_N_overrides[idx]))
+            k_vars.append(kv); n_vars.append(nv)
+            ttk.Entry(row, textvariable=kv, width=14).pack(side="left", padx=(0,6))
+            ttk.Entry(row, textvariable=nv, width=16).pack(side="left")
+
+        btns = ttk.Frame(frame)
+        btns.pack(fill="x", pady=(8,0))
+
+        def _apply():
+            new_k: List[Optional[int]] = []
+            new_n: List[Optional[float]] = []
+            for idx in range(M):
+                k_raw = k_vars[idx].get().strip()
+                n_raw = n_vars[idx].get().strip()
+                if k_raw:
+                    try:
+                        kval = int(k_raw)
+                        if kval <= 0:
+                            raise ValueError
+                        new_k.append(kval)
+                    except Exception:
+                        messagebox.showerror("Per-layer K", f"Layer {idx}: K must be a positive integer.", parent=dlg)
+                        return
+                else:
+                    new_k.append(None)
+                if n_raw:
+                    try:
+                        nval = float(n_raw)
+                        if nval <= 0:
+                            raise ValueError
+                        new_n.append(nval)
+                    except Exception:
+                        messagebox.showerror("Per-layer N", f"Layer {idx}: N must be a positive number.", parent=dlg)
+                        return
+                else:
+                    new_n.append(None)
+            self._layer_K_overrides = new_k
+            self._layer_N_overrides = new_n
+            self.var_layer_kn_summary.set(self._format_layer_kn_summary())
+            dlg.destroy()
+
+        ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side="left", padx=4)
+        ttk.Button(btns, text="Apply", command=_apply).pack(side="right", padx=4)
 
     # ---------------- Helpers ----------------
 
@@ -398,6 +586,25 @@ class BatchApp(tk.Tk):
         self.txt.insert("end", msg + "\n")
         self.txt.see("end")
         self.update_idletasks()
+
+    def _add_layer_config(self, cfg: "LayerConfig"):
+        self._extra_layer_configs.append(cfg)
+        self.var_cfg_summary.set(self._format_cfg_summary())
+
+    def _remove_layer_config(self, cfg: "LayerConfig"):
+        self._extra_layer_configs = [c for c in self._extra_layer_configs if c is not cfg]
+        self.var_cfg_summary.set(self._format_cfg_summary())
+
+    def _get_all_configs(self, m_layers: int) -> List["LayerConfig"]:
+        # Default config mirrors the main layer_dirs values
+        base = LayerConfig(name="Default", dirs=list(self._layer_dirs), apply_all=True)
+        base.ensure_length(m_layers)
+        configs = [base]
+        for cfg in self._extra_layer_configs:
+            clone = cfg.copy()
+            clone.ensure_length(m_layers)
+            configs.append(clone)
+        return configs
 
     def on_browse_folder(self):
         path = filedialog.askdirectory(title="Select mother output folder")
@@ -477,6 +684,18 @@ class BatchApp(tk.Tk):
             raise ValueError("Header fields: vol_res>0, coil_res>0, margin>=0.")
 
         self._ensure_layer_dir_length(M)
+        self._ensure_layer_kn_length(M)
+
+        for idx, kval in enumerate(self._layer_K_overrides):
+            if kval is not None and (not isinstance(kval, int) or kval <= 0):
+                raise ValueError(f"Layer {idx}: K override must be a positive integer or blank.")
+        for idx, nval in enumerate(self._layer_N_overrides):
+            if nval is not None:
+                try:
+                    if float(nval) <= 0:
+                        raise ValueError
+                except Exception:
+                    raise ValueError(f"Layer {idx}: N override must be a positive number or blank.")
 
         return dict(
             Dout=Dout,
@@ -492,6 +711,8 @@ class BatchApp(tk.Tk):
             coil_res=cr,
             margin=mg,
             layer_dirs=list(self._layer_dirs),
+            layer_K_overrides=list(self._layer_K_overrides),
+            layer_N_overrides=list(self._layer_N_overrides),
         )
 
     # ---------------- Main action ----------------
@@ -508,11 +729,6 @@ class BatchApp(tk.Tk):
             messagebox.showerror("Invalid inputs", str(e))
             return
 
-        total = len(ks) * len(ns)
-        if total == 0:
-            messagebox.showwarning("Nothing to do", "Empty sweep (no combinations).")
-            return
-
         # Prepare class/const references from the imported module
         SpiralInputs = getattr(self.SDU, "SpiralInputs")
         SimHeader    = getattr(self.SDU, "SimHeader")
@@ -522,9 +738,16 @@ class BatchApp(tk.Tk):
         BOX_MODE     = getattr(self.SDU, "BOX_MODE", "auto")
 
         # Progress UI
+        combos = [(K, N) for K in ks for N in ns]
+        configs = self._get_all_configs(fx["M"])
+        total = sum(len(combos) if cfg.apply_all or not cfg.combo_filter else len([c for c in combos if c in cfg.combo_filter]) for cfg in configs)
+        if total == 0:
+            messagebox.showwarning("Nothing to do", "Empty sweep (no combinations).")
+            return
+
         self._building = True
         self.prog.config(mode="determinate", maximum=total, value=0)
-        self._log(f"Starting generation: {total} combinations")
+        self._log(f"Starting generation: {total} combination(s) across {len(configs)} configuration(s)")
 
         done = 0
         skipped = 0
@@ -532,11 +755,15 @@ class BatchApp(tk.Tk):
         # Local list to keep track of all subfolders created in this run
         outdirs: List[Path] = []
 
-        for K in ks:
-            for N in ns:
+        for cfg in configs:
+            cfg_combos = combos if cfg.apply_all or not cfg.combo_filter else [c for c in combos if c in cfg.combo_filter]
+            if not cfg_combos:
+                self._log(f"Skip config '{cfg.name}' (no combinations selected)")
+                continue
+            for K, N in cfg_combos:
                 done += 1
                 self.prog['value'] = done
-                subname = safe_combo_folder_name(K, N, fmt=nfmt)
+                subname = safe_combo_folder_name(K, N, fmt=nfmt, m_layers=fx["M"], dirs=cfg.dirs, cfg_name=cfg.name if cfg.name != "Default" else None)
                 outdir  = mother / subname
                 outdir.mkdir(parents=True, exist_ok=True)
                 txt_path = outdir / "Wire_Sections.txt"
@@ -554,7 +781,9 @@ class BatchApp(tk.Tk):
                     M_layers= fx["M"],
                     dz_mm   = fx["dz"],
                     layer_gaps_mm = fx["dz_list"],
-                    layer_dirs = fx["layer_dirs"],
+                    layer_dirs = cfg.dirs,
+                    layer_K_overrides = fx["layer_K_overrides"],
+                    layer_N_overrides = fx["layer_N_overrides"],
                     base_phase_deg     = fx["base"],
                     twist_per_layer_deg= fx["tw"],
                     pts_per_turn       = fx["pts"],
@@ -584,9 +813,155 @@ class BatchApp(tk.Tk):
         # After generating all variants, write Address.txt in the mother folder
         # containing the absolute paths of each generated subfolder.
         write_address_file(mother, outdirs)
+        ok, msg = verify_address_file(mother, outdirs)
+        if ok:
+            messagebox.showinfo("Generation complete", msg)
+        else:
+            messagebox.showwarning("Check outputs", msg)
 
         self._log(f"Done. Created={total - skipped}, Skipped={skipped}, Folder={mother}")
         self._building = False
+
+    def _preview_combos(self) -> List[Tuple[int, float]]:
+        ks, ns, _ = self._read_ranges()
+        return [(K, N) for K in ks for N in ns]
+
+    def _open_layer_config_manager(self):
+        try:
+            combos = self._preview_combos()
+        except Exception:
+            combos = []
+
+        dlg = tk.Toplevel(self)
+        dlg.title("Layer configuration sets")
+        dlg.transient(self)
+        dlg.grab_set()
+
+        frame = ttk.Frame(dlg)
+        frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+        cols = ("Name", "Apply scope", "Dirs")
+        tree = ttk.Treeview(frame, columns=cols, show="headings", height=6)
+        for col in cols:
+            tree.heading(col, text=col)
+        tree.column("Name", width=120)
+        tree.column("Apply scope", width=140)
+        tree.column("Dirs", width=240)
+        tree.pack(fill="both", expand=True)
+
+        def refresh_tree():
+            tree.delete(*tree.get_children())
+            all_cfgs = self._get_all_configs(int(self.var_M.get() or 0))
+            for cfg in all_cfgs:
+                scope = "All K/N" if cfg.apply_all or cfg.combo_filter is None else f"Selected ({len(cfg.combo_filter)})"
+                tree.insert("", "end", iid=cfg.name, values=(cfg.name, scope, " / ".join(cfg.dirs)))
+
+        btn_frame = ttk.Frame(dlg)
+        btn_frame.pack(fill="x", pady=(6, 0))
+
+        def choose_dirs(base_dirs: List[str]) -> List[str]:
+            temp = LayerConfig("temp", list(base_dirs))
+            self._ensure_layer_dir_length(len(base_dirs))
+            # reuse existing dialog for directions
+            # we temporarily patch _layer_dirs to reuse logic
+            saved = list(self._layer_dirs)
+            self._layer_dirs = list(base_dirs)
+            self._open_layer_dir_dialog()
+            dirs = list(self._layer_dirs)
+            self._layer_dirs = saved
+            return dirs
+
+        def on_add():
+            name = simpledialog.askstring("Config name", "Enter a name for this layer configuration:", parent=dlg)
+            if not name:
+                return
+            dirs = choose_dirs(self._layer_dirs)
+            cfg = LayerConfig(name=name, dirs=dirs, apply_all=True)
+            cfg.ensure_length(len(self._layer_dirs))
+            self._add_layer_config(cfg)
+            refresh_tree()
+
+        def on_remove():
+            sel = tree.selection()
+            if not sel:
+                return
+            name = sel[0]
+            if name == "Default":
+                messagebox.showinfo("Protected", "The default configuration cannot be removed.", parent=dlg)
+                return
+            cfg = next((c for c in self._extra_layer_configs if c.name == name), None)
+            if cfg:
+                self._remove_layer_config(cfg)
+                refresh_tree()
+
+        def on_scope():
+            sel = tree.selection()
+            if not sel:
+                return
+            name = sel[0]
+            cfg = next((c for c in self._extra_layer_configs if c.name == name), None)
+            if not cfg:
+                messagebox.showinfo("Protected", "Default configuration always applies to all.", parent=dlg)
+                return
+            cfg.apply_all = not cfg.apply_all
+            if cfg.apply_all:
+                cfg.combo_filter = None
+            refresh_tree()
+
+        def on_choose_combos():
+            sel = tree.selection()
+            if not sel:
+                return
+            name = sel[0]
+            cfg = next((c for c in self._extra_layer_configs if c.name == name), None)
+            if not cfg:
+                return
+            if not combos:
+                messagebox.showwarning("Ranges not ready", "Enter valid K/N ranges first to choose specific combinations.", parent=dlg)
+                return
+            cfg.apply_all = False
+
+            chooser = tk.Toplevel(dlg)
+            chooser.title(f"Select combos for {cfg.name}")
+            chooser.transient(dlg)
+            chooser.grab_set()
+
+            vars: List[tk.BooleanVar] = []
+            for combo in combos:
+                var = tk.BooleanVar(value=(cfg.combo_filter is None or combo in (cfg.combo_filter or set())))
+                chk = ttk.Checkbutton(chooser, text=f"K{combo[0]} / N{combo[1]}", variable=var)
+                chk.pack(anchor="w", padx=8, pady=2)
+                vars.append(var)
+
+            def select_all():
+                for v in vars:
+                    v.set(True)
+
+            def clear_all():
+                for v in vars:
+                    v.set(False)
+
+            btns = ttk.Frame(chooser)
+            btns.pack(fill="x", pady=4)
+            ttk.Button(btns, text="All", command=select_all).pack(side="left", padx=4)
+            ttk.Button(btns, text="None", command=clear_all).pack(side="left", padx=4)
+
+            def apply_and_close():
+                selected = {combo for combo, flag in zip(combos, vars) if flag.get()}
+                cfg.combo_filter = selected
+                chooser.destroy()
+                refresh_tree()
+
+            ttk.Button(btns, text="OK", command=apply_and_close).pack(side="right", padx=4)
+
+        ttk.Button(btn_frame, text="Add", command=on_add).pack(side="left", padx=4)
+        ttk.Button(btn_frame, text="Remove", command=on_remove).pack(side="left", padx=4)
+        ttk.Button(btn_frame, text="Toggle scope", command=on_scope).pack(side="left", padx=4)
+        ttk.Button(btn_frame, text="Choose combos…", command=on_choose_combos).pack(side="left", padx=4)
+
+        ttk.Button(dlg, text="Close", command=dlg.destroy).pack(pady=8)
+
+        refresh_tree()
 
 
 # ------------------------------------------------------------------------------

@@ -626,6 +626,7 @@ class SpiralApp(tk.Tk):
             row,
         ); row+=1
         self._add_layer_dir_row(f, row); row+=1
+        self._add_layer_kn_row(f, row); row+=1
         self._add_labeled_entry(f, "Base phase [deg]:",           self.var_base_phase, row); row+=1
         self._add_labeled_entry(f, "Twist per layer [deg]:",      self.var_twist_layer, row); row+=1
         self._add_labeled_entry(f, "Sampling PTS_PER_TURN:",      self.var_pts,  row); row+=1
@@ -717,6 +718,21 @@ class SpiralApp(tk.Tk):
         else:
             cur = cur[:M]
         self._layer_dirs = cur
+
+    def _ensure_layer_kn_length(self, M: int):
+        M = max(0, int(M))
+        k_list = list(self._layer_K_overrides)
+        n_list = list(self._layer_N_overrides)
+        if len(k_list) < M:
+            k_list.extend([None] * (M - len(k_list)))
+        else:
+            k_list = k_list[:M]
+        if len(n_list) < M:
+            n_list.extend([None] * (M - len(n_list)))
+        else:
+            n_list = n_list[:M]
+        self._layer_K_overrides = k_list
+        self._layer_N_overrides = n_list
 
     def _format_layer_dir_summary(self) -> str:
         if not self._layer_dirs:

@@ -537,6 +537,90 @@ class BatchApp(tk.Tk):
         ttk.Button(btns, text="Cancel", command=dlg.destroy).grid(row=0, column=0, sticky="e", padx=4)
         ttk.Button(btns, text="OK", command=_apply_and_close).grid(row=0, column=1, sticky="w", padx=4)
 
+    def _open_layer_kn_dialog(self):
+        """Dialog for per-layer K (arms) and N (turns) overrides."""
+        try:
+            M = int(self.var_M.get())
+        except Exception:
+            messagebox.showerror("Layer K/N", "Please enter a valid M value first.")
+            return
+        if M <= 0:
+            messagebox.showerror("Layer K/N", "Layer count must be ≥ 1.")
+            return
+
+        self._ensure_layer_kn_length(M)
+
+        dlg = tk.Toplevel(self)
+        dlg.title("Per-layer K/N overrides")
+        dlg.transient(self)
+        dlg.grab_set()
+
+        ttk.Label(
+            dlg,
+            text=(
+                "Leave fields blank to use the sweep K/N for that layer.\n"
+                "K must be a positive integer; N must be a positive number."
+            ),
+            justify="left",
+            padding=8,
+        ).pack(fill="x")
+
+        body = ttk.Frame(dlg)
+        body.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        k_entries: List[tk.Entry] = []
+        n_entries: List[tk.Entry] = []
+        for idx in range(M):
+            row = ttk.Frame(body)
+            row.pack(fill="x", pady=3)
+            ttk.Label(row, text=f"Layer {idx}").pack(side="left", padx=(0, 8))
+
+            ttk.Label(row, text="K=").pack(side="left", padx=(0, 2))
+            k_entry = ttk.Entry(row, width=8)
+            k_val = "" if self._layer_K_overrides[idx] is None else str(self._layer_K_overrides[idx])
+            k_entry.insert(0, k_val)
+            k_entry.pack(side="left")
+            k_entries.append(k_entry)
+
+            ttk.Label(row, text="N=").pack(side="left", padx=(8, 2))
+            n_entry = ttk.Entry(row, width=10)
+            n_val = "" if self._layer_N_overrides[idx] is None else str(self._layer_N_overrides[idx])
+            n_entry.insert(0, n_val)
+            n_entry.pack(side="left")
+            n_entries.append(n_entry)
+
+        btns = ttk.Frame(dlg)
+        btns.pack(fill="x", padx=10, pady=(0, 10))
+        btns.grid_columnconfigure(0, weight=1)
+        btns.grid_columnconfigure(1, weight=1)
+
+        def _apply_and_close():
+            new_k: List[Optional[int]] = []
+            new_n: List[Optional[float]] = []
+            try:
+                for k_entry, n_entry in zip(k_entries, n_entries):
+                    k_raw = k_entry.get().strip()
+                    n_raw = n_entry.get().strip()
+                    k_val = int(k_raw) if k_raw != "" else None
+                    n_val = float(n_raw) if n_raw != "" else None
+                    if k_val is not None and k_val <= 0:
+                        raise ValueError("K must be > 0")
+                    if n_val is not None and n_val <= 0:
+                        raise ValueError("N must be > 0")
+                    new_k.append(k_val)
+                    new_n.append(n_val)
+            except Exception as exc:
+                messagebox.showerror("Layer K/N", f"Invalid entry: {exc}", parent=dlg)
+                return
+
+            self._layer_K_overrides = new_k
+            self._layer_N_overrides = new_n
+            self.var_layer_kn_summary.set(self._format_layer_kn_summary())
+            dlg.destroy()
+
+        ttk.Button(btns, text="Cancel", command=dlg.destroy).grid(row=0, column=0, sticky="e", padx=4)
+        ttk.Button(btns, text="OK", command=_apply_and_close).grid(row=0, column=1, sticky="w", padx=4)
+
     # ---------------- Helpers ----------------
 
     def _log(self, msg: str):
@@ -747,6 +831,14 @@ class BatchApp(tk.Tk):
                 # Remember this subfolder so we can later write it into Address.txt
                 outdirs.append(outdir)
 
+                layer_arms = None
+                if fx["layer_K_overrides"] and any(k is not None for k in fx["layer_K_overrides"]):
+                    layer_arms = [int(k) if k is not None else int(K) for k in fx["layer_K_overrides"]]
+
+                layer_turns = None
+                if fx["layer_N_overrides"] and any(n is not None for n in fx["layer_N_overrides"]):
+                    layer_turns = [float(n) if n is not None else float(N) for n in fx["layer_N_overrides"]]
+
                 # Build the params for this combo (only K and N change)
                 params = SpiralInputs(
                     Dout_mm = fx["Dout"],
@@ -758,6 +850,8 @@ class BatchApp(tk.Tk):
                     dz_mm   = fx["dz"],
                     layer_gaps_mm = fx["dz_list"],
                     layer_dirs = cfg.dirs,
+                    layer_arms = layer_arms,
+                    layer_turns= layer_turns,
                     base_phase_deg     = fx["base"],
                     twist_per_layer_deg= fx["tw"],
                     pts_per_turn       = fx["pts"],

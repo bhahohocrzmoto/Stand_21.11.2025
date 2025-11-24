@@ -170,6 +170,24 @@ def verify_address_file(mother: Path, expected: List[Path], filename: str = "Add
     return True, "All generated folders are present in Address.txt."
 
 
+def verify_address_file(mother: Path, expected: List[Path], filename: str = "Address.txt") -> Tuple[bool, str]:
+    """Confirm Address.txt exists and matches the generated folders."""
+    addr_path = mother / filename
+    if not addr_path.is_file():
+        return False, "Address.txt was not written."
+    lines = [Path(line.strip()) for line in addr_path.read_text().splitlines() if line.strip()]
+    expected_resolved = [p.resolve() for p in expected]
+    if len(lines) != len(expected_resolved):
+        return False, "Address.txt entry count does not match generated folders."
+    missing = [p for p in lines if not p.exists()]
+    if missing:
+        return False, f"Missing folders listed in Address.txt: {', '.join(str(m) for m in missing)}"
+    mismatch = set(lines) ^ set(expected_resolved)
+    if mismatch:
+        return False, "Address.txt entries differ from generated folders."
+    return True, "All generated folders are present in Address.txt."
+
+
 # ------------------------------------------------------------------------------
 # 2) Dynamic import helper — load Spiral_Drawer_updated.py cleanly if needed
 # ------------------------------------------------------------------------------
@@ -259,6 +277,7 @@ class BatchApp(tk.Tk):
         self.var_base = tk.StringVar(value="0.0")
         self.var_twist= tk.StringVar(value="0.0")
         self.var_layer_dir_summary = tk.StringVar(value="All layers: CCW")
+        self.var_layer_kn_summary = tk.StringVar(value="Using sweep K/N")
 
         # Sampling density — take the constant from the original module if present
         default_pts = getattr(self.SDU, "PTS_PER_TURN", 50)
@@ -339,6 +358,17 @@ class BatchApp(tk.Tk):
         ttk.Button(dir_row, text="Set…", command=self._open_layer_dir_dialog).pack(side="left", padx=6)
         ttk.Label(dir_row, textvariable=self.var_layer_dir_summary).pack(side="left", padx=4)
 
+        kn_row = ttk.Frame(adv); kn_row.pack(fill="x", padx=8, pady=3)
+        ttk.Label(kn_row, text="Per-layer K / N overrides:").pack(side="left")
+        ttk.Button(kn_row, text="Set…", command=self._open_layer_kn_dialog).pack(side="left", padx=6)
+        ttk.Label(kn_row, textvariable=self.var_layer_kn_summary).pack(side="left", padx=4)
+
+        cfg_row = ttk.Frame(adv); cfg_row.pack(fill="x", padx=8, pady=3)
+        ttk.Label(cfg_row, text="Layer configurations (CW/CCW sets):").pack(side="left")
+        ttk.Button(cfg_row, text="Manage…", command=self._open_layer_config_manager).pack(side="left", padx=6)
+        self.var_cfg_summary = tk.StringVar(value="Using 1 configuration")
+        ttk.Label(cfg_row, textvariable=self.var_cfg_summary).pack(side="left", padx=4)
+
         cfg_row = ttk.Frame(adv); cfg_row.pack(fill="x", padx=8, pady=3)
         ttk.Label(cfg_row, text="Layer configurations (CW/CCW sets):").pack(side="left")
         ttk.Button(cfg_row, text="Manage…", command=self._open_layer_config_manager).pack(side="left", padx=6)
@@ -385,21 +415,10 @@ class BatchApp(tk.Tk):
             M = int(self.var_M.get())
         except Exception:
             M = 0
-        # Maintain any state that depends on the layer count. Older builds
-        # referenced _ensure_layer_kn_length, so keep the compatibility hook
-        # while delegating to the existing direction/config length guard.
+        self._ensure_layer_dir_length(M)
         self._ensure_layer_kn_length(M)
         self.var_layer_dir_summary.set(self._format_layer_dir_summary())
-
-    def _ensure_layer_kn_length(self, M: int):
-        """
-        Backward-compatible wrapper to keep per-layer state sized correctly.
-
-        Earlier revisions called this helper during M changes; the current
-        implementation simply reuses the direction/config length guard so
-        callers from either name succeed.
-        """
-        self._ensure_layer_dir_length(M)
+        self.var_layer_kn_summary.set(self._format_layer_kn_summary())
 
     def _ensure_layer_dir_length(self, M: int):
         M = max(0, int(M))
@@ -421,6 +440,27 @@ class BatchApp(tk.Tk):
             return f"All layers: {val}"
         preview = ", ".join(f"L{idx}:{val}" for idx, val in enumerate(self._layer_dirs))
         return f"Layer dirs → {preview}"
+
+    def _format_layer_kn_summary(self) -> str:
+        if not self._layer_K_overrides and not self._layer_N_overrides:
+            return "Using sweep K/N"
+        parts = []
+        for idx, (k, n) in enumerate(zip(self._layer_K_overrides, self._layer_N_overrides)):
+            if k is None and n is None:
+                continue
+            tag = f"L{idx}:"
+            if k is not None:
+                tag += f"K={k}"
+            if n is not None:
+                tag += (" " if k is not None else "") + f"N={n}"
+            parts.append(tag)
+        return "Overrides → " + ("; ".join(parts) if parts else "Using sweep K/N")
+
+    def _format_cfg_summary(self) -> str:
+        total = 1 + len(self._extra_layer_configs)
+        names = [cfg.name for cfg in self._extra_layer_configs]
+        suffix = f" (+ {', '.join(names)})" if names else ""
+        return f"Using {total} configuration(s){suffix}"
 
     def _format_cfg_summary(self) -> str:
         total = 1 + len(self._extra_layer_configs)
@@ -489,6 +529,25 @@ class BatchApp(tk.Tk):
         self.txt.insert("end", msg + "\n")
         self.txt.see("end")
         self.update_idletasks()
+
+    def _add_layer_config(self, cfg: "LayerConfig"):
+        self._extra_layer_configs.append(cfg)
+        self.var_cfg_summary.set(self._format_cfg_summary())
+
+    def _remove_layer_config(self, cfg: "LayerConfig"):
+        self._extra_layer_configs = [c for c in self._extra_layer_configs if c is not cfg]
+        self.var_cfg_summary.set(self._format_cfg_summary())
+
+    def _get_all_configs(self, m_layers: int) -> List["LayerConfig"]:
+        # Default config mirrors the main layer_dirs values
+        base = LayerConfig(name="Default", dirs=list(self._layer_dirs), apply_all=True)
+        base.ensure_length(m_layers)
+        configs = [base]
+        for cfg in self._extra_layer_configs:
+            clone = cfg.copy()
+            clone.ensure_length(m_layers)
+            configs.append(clone)
+        return configs
 
     def _add_layer_config(self, cfg: "LayerConfig"):
         self._extra_layer_configs.append(cfg)
@@ -587,6 +646,18 @@ class BatchApp(tk.Tk):
             raise ValueError("Header fields: vol_res>0, coil_res>0, margin>=0.")
 
         self._ensure_layer_dir_length(M)
+        self._ensure_layer_kn_length(M)
+
+        for idx, kval in enumerate(self._layer_K_overrides):
+            if kval is not None and (not isinstance(kval, int) or kval <= 0):
+                raise ValueError(f"Layer {idx}: K override must be a positive integer or blank.")
+        for idx, nval in enumerate(self._layer_N_overrides):
+            if nval is not None:
+                try:
+                    if float(nval) <= 0:
+                        raise ValueError
+                except Exception:
+                    raise ValueError(f"Layer {idx}: N override must be a positive number or blank.")
 
         return dict(
             Dout=Dout,
@@ -602,6 +673,8 @@ class BatchApp(tk.Tk):
             coil_res=cr,
             margin=mg,
             layer_dirs=list(self._layer_dirs),
+            layer_K_overrides=list(self._layer_K_overrides),
+            layer_N_overrides=list(self._layer_N_overrides),
         )
 
     # ---------------- Main action ----------------

@@ -240,6 +240,13 @@ class BatchApp(tk.Tk):
         self.geometry("780x620")
         self.minsize(740, 580)
 
+        # Older launch paths invoked a helper named `_ensure_layer_kn_length` during
+        # layer-count changes. Bind a safe alias early so attribute lookups never
+        # fall through to the underlying tkapp (which triggers AttributeError on
+        # some Python builds) even if downstream code still references the legacy
+        # name.
+        self._ensure_layer_kn_length = self._ensure_layer_dir_length
+
         # Keep a handle to the imported module (your original code)
         self.SDU = SDU_module
 

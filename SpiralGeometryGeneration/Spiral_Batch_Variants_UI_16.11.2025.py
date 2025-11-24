@@ -240,13 +240,6 @@ class BatchApp(tk.Tk):
         self.geometry("780x620")
         self.minsize(740, 580)
 
-        # Older launch paths invoked a helper named `_ensure_layer_kn_length` during
-        # layer-count changes. Bind a safe alias early so attribute lookups never
-        # fall through to the underlying tkapp (which triggers AttributeError on
-        # some Python builds) even if downstream code still references the legacy
-        # name.
-        self._ensure_layer_kn_length = self._ensure_layer_dir_length
-
         # Keep a handle to the imported module (your original code)
         self.SDU = SDU_module
 
@@ -294,6 +287,8 @@ class BatchApp(tk.Tk):
         # Internal state
         self._building = False
         self._layer_dirs: List[str] = []
+        self._layer_K_overrides: List[Optional[int]] = []
+        self._layer_N_overrides: List[Optional[float]] = []
         self._extra_layer_configs: List[LayerConfig] = []
         self.var_M.trace_add("write", self._on_layers_changed)
         self._on_layers_changed()
@@ -430,6 +425,25 @@ class BatchApp(tk.Tk):
         self._layer_dirs = cur
         for cfg in self._extra_layer_configs:
             cfg.ensure_length(M)
+
+    def _ensure_layer_kn_length(self, M: int):
+        """Ensure the K/N override arrays match the requested layer count."""
+        M = max(0, int(M))
+        cur_k = list(self._layer_K_overrides)
+        cur_n = list(self._layer_N_overrides)
+
+        if len(cur_k) < M:
+            cur_k.extend([None] * (M - len(cur_k)))
+        else:
+            cur_k = cur_k[:M]
+
+        if len(cur_n) < M:
+            cur_n.extend([None] * (M - len(cur_n)))
+        else:
+            cur_n = cur_n[:M]
+
+        self._layer_K_overrides = cur_k
+        self._layer_N_overrides = cur_n
 
     def _format_layer_dir_summary(self) -> str:
         if not self._layer_dirs:

@@ -300,9 +300,37 @@ class MainApp(tk.Tk):
         if not SPIRAL_UI.exists():
             messagebox.showerror("Missing script", f"Cannot find {SPIRAL_UI}")
             return
-        subprocess.Popen([sys.executable, str(SPIRAL_UI)])
-        self.log.insert("end", "Launched spiral generator UI.\n")
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, str(SPIRAL_UI)],
+                cwd=str(SPIRAL_UI.parent),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Launch failed", str(exc))
+            return
+
+        self.log.insert("end", f"Launched spiral generator UI (pid {proc.pid}).\n")
         self.log.see("end")
+
+        def _check_proc():
+            ret = proc.poll()
+            if ret is None:
+                return
+            out, err = proc.communicate()
+            if ret != 0:
+                messagebox.showerror(
+                    "Generator exited", err or out or f"Exited with status {ret}", parent=self
+                )
+                self.log.insert("end", err or out or f"Generator exited with {ret}\n")
+            elif out or err:
+                self.log.insert("end", (out or "") + (err or ""))
+            self.log.see("end")
+
+        # Surface immediate failures instead of silently ignoring them
+        self.after(1200, _check_proc)
 
     def _browse_address(self):
         path = filedialog.askopenfilename(title="Select Address.txt", filetypes=[("Address", "Address.txt"), ("Text", "*.txt")])

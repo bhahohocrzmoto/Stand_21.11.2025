@@ -222,6 +222,13 @@ class BatchApp(tk.Tk):
         self.geometry("780x620")
         self.minsize(740, 580)
 
+        # Older launch paths invoked a helper named `_ensure_layer_kn_length` during
+        # layer-count changes. Bind a safe alias early so attribute lookups never
+        # fall through to the underlying tkapp (which triggers AttributeError on
+        # some Python builds) even if downstream code still references the legacy
+        # name.
+        self._ensure_layer_kn_length = self._ensure_layer_dir_length
+
         # Keep a handle to the imported module (your original code)
         self.SDU = SDU_module
 
@@ -378,8 +385,21 @@ class BatchApp(tk.Tk):
             M = int(self.var_M.get())
         except Exception:
             M = 0
-        self._ensure_layer_dir_length(M)
+        # Maintain any state that depends on the layer count. Older builds
+        # referenced _ensure_layer_kn_length, so keep the compatibility hook
+        # while delegating to the existing direction/config length guard.
+        self._ensure_layer_kn_length(M)
         self.var_layer_dir_summary.set(self._format_layer_dir_summary())
+
+    def _ensure_layer_kn_length(self, M: int):
+        """
+        Backward-compatible wrapper to keep per-layer state sized correctly.
+
+        Earlier revisions called this helper during M changes; the current
+        implementation simply reuses the direction/config length guard so
+        callers from either name succeed.
+        """
+        self._ensure_layer_dir_length(M)
 
     def _ensure_layer_dir_length(self, M: int):
         M = max(0, int(M))

@@ -98,6 +98,8 @@ class SpiralInputs:
     pts_per_turn: int           # Sampling density along the curve
     layer_gaps_mm: Optional[List[float]] = None  # Optional per-layer spacings; overrides dz_mm when provided
     layer_dirs: Optional[List[str]] = None       # Optional per-layer chirality ("CCW"/"CW"); defaults to CCW
+    layer_arms: Optional[List[int]] = None       # Optional per-layer arm counts (fallbacks to K_arms)
+    layer_turns: Optional[List[float]] = None    # Optional per-layer turns (fallbacks to N_turns)
 
 @dataclass
 class SimHeader:
@@ -240,6 +242,40 @@ def _normalize_layer_dirs(M_layers: int, user_dirs: Optional[List[str]]) -> List
     return dirs
 
 
+def _normalize_layer_counts(M_layers: int, user_vals: Optional[List[int]], default: int, label: str) -> List[int]:
+    """Normalize per-layer integer counts (e.g., arms)."""
+
+    M = int(M_layers)
+    vals: List[int] = []
+    if user_vals is not None:
+        vals = [int(v) for v in user_vals]
+    if len(vals) < M:
+        vals.extend([default] * (M - len(vals)))
+    vals = vals[:M]
+
+    for idx, v in enumerate(vals):
+        if v <= 0:
+            raise ValueError(f"{label} for layer {idx} must be > 0")
+    return vals
+
+
+def _normalize_layer_turns(M_layers: int, user_vals: Optional[List[float]], default: float) -> List[float]:
+    """Normalize per-layer turn counts (float)."""
+
+    M = int(M_layers)
+    vals: List[float] = []
+    if user_vals is not None:
+        vals = [float(v) for v in user_vals]
+    if len(vals) < M:
+        vals.extend([default] * (M - len(vals)))
+    vals = vals[:M]
+
+    for idx, v in enumerate(vals):
+        if v <= 0:
+            raise ValueError(f"Turns for layer {idx} must be > 0")
+    return vals
+
+
 def _apply_chirality(poly: Polyline2D, chirality: str) -> Polyline2D:
     """Return a polyline mirrored for CW layers (theta → -theta)."""
 
@@ -257,27 +293,6 @@ def build_multiarm_geometry(params: SpiralInputs) -> Tuple[List[Polyline2D], Lis
 
     Lists align index-by-index; arms are grouped layer-major, then arm index.
     """
-    # Build the *base* arm centerline (arm 0 at layer 0, no rotation).
-    base = _single_arm_centerline_xy(
-        Dout_mm       = params.Dout_mm,
-        W_mm          = params.W_mm,
-        S_mm          = params.S_mm,
-        N_turns       = params.N_turns,
-        N_arm         = params.K_arms,
-        pts_per_turn  = params.pts_per_turn
-    )
-
-    # Precompute all arm rotations (in degrees) for a single layer.
-    # Arm k gets phase: base_phase + k * (360/K)
-    K = max(1, int(params.K_arms))
-    base_phase = float(params.base_phase_deg)
-    per_arm_deg = 360.0 / K
-
-    arm_polys_one_layer: List[Polyline2D] = []
-    for k in range(K):
-        rot_deg = base_phase + k * per_arm_deg
-        arm_polys_one_layer.append(_rotate_xy(base, rot_deg))
-
     # Prepare Z levels, per-layer twist, and chirality controls
     # Prepare Z levels and per-layer twist
     z_levels_layer0_to_M = _layer_z_levels(
@@ -288,17 +303,36 @@ def build_multiarm_geometry(params: SpiralInputs) -> Tuple[List[Polyline2D], Lis
         params.layer_gaps_mm,
     )
     layer_dirs = _normalize_layer_dirs(params.M_layers, params.layer_dirs)
+    layer_arms = _normalize_layer_counts(params.M_layers, params.layer_arms, int(params.K_arms), "Arms")
+    layer_turns= _normalize_layer_turns(params.M_layers, params.layer_turns, float(params.N_turns))
     twist_per_layer = float(params.twist_per_layer_deg)
+    base_phase = float(params.base_phase_deg)
 
     all_polys: List[Polyline2D] = []
     all_z:     List[float]      = []
     all_dirs:  List[str]        = []
 
     for layer_idx, z in enumerate(z_levels_layer0_to_M):
+        k_layer = layer_arms[layer_idx]
+        n_layer = layer_turns[layer_idx]
+
+        # Build the base arm for this layer using its own turn count and arm pitch
+        base = _single_arm_centerline_xy(
+            Dout_mm       = params.Dout_mm,
+            W_mm          = params.W_mm,
+            S_mm          = params.S_mm,
+            N_turns       = n_layer,
+            N_arm         = k_layer,
+            pts_per_turn  = params.pts_per_turn
+        )
+
+        per_arm_deg = 360.0 / k_layer
         extra_twist = layer_idx * twist_per_layer  # optional additional rotation per higher layer
         chirality = layer_dirs[layer_idx] if layer_idx < len(layer_dirs) else "CCW"
 
-        for poly in arm_polys_one_layer:
+        for arm_idx in range(k_layer):
+            rot_deg = base_phase + arm_idx * per_arm_deg
+            poly = _rotate_xy(base, rot_deg)
             oriented = _apply_chirality(poly, chirality)
             if extra_twist != 0.0:
                 oriented = _rotate_xy(oriented, extra_twist)
@@ -535,6 +569,8 @@ class SpiralApp(tk.Tk):
         self.var_twist_layer= tk.StringVar(value="0")  # deg per layer
         self.var_pts  = tk.StringVar(value=str(PTS_PER_TURN))
         self.var_layer_dirs_summary = tk.StringVar(value="All layers: CCW")
+        self.var_layer_arms_summary = tk.StringVar(value="All layers: K=1")
+        self.var_layer_turns_summary = tk.StringVar(value="All layers: N=100.0")
 
         # Header (cm)
         self.var_vol_res  = tk.StringVar(value=str(DEF_VOL_RES_CM))
@@ -555,7 +591,11 @@ class SpiralApp(tk.Tk):
 
         # Per-layer chirality state (list of "CCW"/"CW")
         self._layer_dirs: List[str] = []
+        self._layer_arms: List[int] = []
+        self._layer_turns: List[float] = []
         self.var_M.trace_add("write", self._on_layers_changed)
+        self.var_K.trace_add("write", self._on_layers_changed)
+        self.var_N.trace_add("write", self._on_layers_changed)
         self._on_layers_changed()
 
     # Build form + preview + buttons
@@ -576,6 +616,8 @@ class SpiralApp(tk.Tk):
         self._add_labeled_entry(f, "Turns per arm N (fractional):", self.var_N,  row); row+=1
         self._add_labeled_entry(f, "Arms per layer K:",           self.var_K,    row); row+=1
         self._add_labeled_entry(f, "Number of layers M:",         self.var_M,    row); row+=1
+        self._add_layer_arms_row(f, row); row+=1
+        self._add_layer_turns_row(f, row); row+=1
         self._add_labeled_entry(f, "Inter-layer distance Δz [mm] (≤0 or blank → W+S):", self.var_dz, row); row+=1
         self._add_labeled_entry(
             f,
@@ -631,13 +673,41 @@ class SpiralApp(tk.Tk):
         ttk.Button(frm, text="Set…", command=self._open_layer_dir_dialog).pack(side="left")
         ttk.Label(frm, textvariable=self.var_layer_dirs_summary).pack(side="left", padx=8)
 
+    def _add_layer_arms_row(self, parent, row):
+        frm = ttk.Frame(parent)
+        frm.grid(row=row, column=0, sticky="w", padx=4, pady=3)
+        ttk.Label(frm, text="Arms per layer overrides:", width=36, anchor="w").pack(side="left")
+        ttk.Button(frm, text="Set…", command=self._open_layer_arms_dialog).pack(side="left")
+        ttk.Label(frm, textvariable=self.var_layer_arms_summary).pack(side="left", padx=8)
+
+    def _add_layer_turns_row(self, parent, row):
+        frm = ttk.Frame(parent)
+        frm.grid(row=row, column=0, sticky="w", padx=4, pady=3)
+        ttk.Label(frm, text="Turns per layer overrides:", width=36, anchor="w").pack(side="left")
+        ttk.Button(frm, text="Set…", command=self._open_layer_turns_dialog).pack(side="left")
+        ttk.Label(frm, textvariable=self.var_layer_turns_summary).pack(side="left", padx=8)
+
     def _on_layers_changed(self, *args):
         try:
             M = int(self.var_M.get())
         except Exception:
             M = 0
+        try:
+            K = int(self.var_K.get())
+        except Exception:
+            K = 1
+        try:
+            N = float(self.var_N.get())
+        except Exception:
+            N = 1.0
+
         self._ensure_layer_dir_length(M)
+        self._ensure_layer_arms_length(M, K)
+        self._ensure_layer_turns_length(M, N)
+
         self.var_layer_dirs_summary.set(self._format_layer_dir_summary())
+        self.var_layer_arms_summary.set(self._format_layer_arms_summary())
+        self.var_layer_turns_summary.set(self._format_layer_turns_summary())
 
     def _ensure_layer_dir_length(self, M: int):
         M = max(0, int(M))
@@ -657,6 +727,47 @@ class SpiralApp(tk.Tk):
             return f"All layers: {val}"
         preview = ", ".join(f"L{idx}:{val}" for idx, val in enumerate(self._layer_dirs))
         return f"Layer dirs → {preview}"
+
+    def _ensure_layer_arms_length(self, M: int, default: int):
+        M = max(0, int(M))
+        default = max(1, int(default))
+        cur = list(self._layer_arms)
+        if len(cur) < M:
+            cur.extend([default] * (M - len(cur)))
+        else:
+            cur = cur[:M]
+        self._layer_arms = [max(1, int(v)) for v in cur]
+
+    def _format_layer_arms_summary(self) -> str:
+        if not self._layer_arms:
+            return "All layers: K unset"
+        unique = set(self._layer_arms)
+        if len(unique) == 1:
+            return f"All layers: K={next(iter(unique))}"
+        preview = ", ".join(f"L{idx}:K={val}" for idx, val in enumerate(self._layer_arms))
+        return f"Arms → {preview}"
+
+    def _ensure_layer_turns_length(self, M: int, default: float):
+        M = max(0, int(M))
+        try:
+            default_val = float(default)
+        except Exception:
+            default_val = 1.0
+        cur = list(self._layer_turns)
+        if len(cur) < M:
+            cur.extend([default_val] * (M - len(cur)))
+        else:
+            cur = cur[:M]
+        self._layer_turns = [max(0.0001, float(v)) for v in cur]
+
+    def _format_layer_turns_summary(self) -> str:
+        if not self._layer_turns:
+            return "All layers: N unset"
+        unique = set(self._layer_turns)
+        if len(unique) == 1:
+            return f"All layers: N={next(iter(unique))}"
+        preview = ", ".join(f"L{idx}:N={val}" for idx, val in enumerate(self._layer_turns))
+        return f"Turns → {preview}"
 
     def _open_layer_dir_dialog(self):
         try:
@@ -712,6 +823,107 @@ class SpiralApp(tk.Tk):
         ttk.Button(btns, text="Cancel", command=dlg.destroy).grid(row=0, column=0, sticky="e", padx=4)
         ttk.Button(btns, text="OK", command=_apply_and_close).grid(row=0, column=1, sticky="w", padx=4)
 
+    def _open_layer_arms_dialog(self):
+        try:
+            M = int(self.var_M.get())
+            default_K = int(self.var_K.get())
+        except Exception:
+            messagebox.showerror("Layer arms", "Please enter valid layer and arm counts first.")
+            return
+        if M <= 0 or default_K <= 0:
+            messagebox.showerror("Layer arms", "Layer count and K must be ≥ 1.")
+            return
+
+        self._ensure_layer_arms_length(M, default_K)
+
+        dlg = tk.Toplevel(self)
+        dlg.title("Arms per layer")
+        dlg.transient(self)
+        dlg.grab_set()
+
+        body = ttk.Frame(dlg)
+        body.pack(fill="both", expand=True, padx=10, pady=10)
+
+        entries: List[tk.Spinbox] = []
+        for idx in range(M):
+            row = ttk.Frame(body)
+            row.pack(fill="x", pady=3)
+            ttk.Label(row, text=f"Layer {idx}").pack(side="left", padx=(0, 8))
+            spin = tk.Spinbox(row, from_=1, to=9999, width=6)
+            spin.delete(0, "end")
+            spin.insert(0, str(self._layer_arms[idx]))
+            spin.pack(side="left")
+            entries.append(spin)
+
+        btns = ttk.Frame(dlg)
+        btns.pack(fill="x", padx=10, pady=(0, 10))
+        btns.grid_columnconfigure(0, weight=1)
+        btns.grid_columnconfigure(1, weight=1)
+
+        def _apply_and_close():
+            try:
+                vals = [max(1, int(spin.get())) for spin in entries]
+            except Exception:
+                messagebox.showerror("Layer arms", "Please enter integer values ≥ 1.", parent=dlg)
+                return
+            self._layer_arms = vals
+            self.var_layer_arms_summary.set(self._format_layer_arms_summary())
+            dlg.destroy()
+
+        ttk.Button(btns, text="Cancel", command=dlg.destroy).grid(row=0, column=0, sticky="e", padx=4)
+        ttk.Button(btns, text="OK", command=_apply_and_close).grid(row=0, column=1, sticky="w", padx=4)
+
+    def _open_layer_turns_dialog(self):
+        try:
+            M = int(self.var_M.get())
+            default_N = float(self.var_N.get())
+        except Exception:
+            messagebox.showerror("Layer turns", "Please enter valid layer count and N first.")
+            return
+        if M <= 0 or default_N <= 0:
+            messagebox.showerror("Layer turns", "Layer count and N must be > 0.")
+            return
+
+        self._ensure_layer_turns_length(M, default_N)
+
+        dlg = tk.Toplevel(self)
+        dlg.title("Turns per layer")
+        dlg.transient(self)
+        dlg.grab_set()
+
+        body = ttk.Frame(dlg)
+        body.pack(fill="both", expand=True, padx=10, pady=10)
+
+        entries: List[tk.Entry] = []
+        for idx in range(M):
+            row = ttk.Frame(body)
+            row.pack(fill="x", pady=3)
+            ttk.Label(row, text=f"Layer {idx}").pack(side="left", padx=(0, 8))
+            ent = ttk.Entry(row, width=10)
+            ent.insert(0, str(self._layer_turns[idx]))
+            ent.pack(side="left")
+            entries.append(ent)
+
+        btns = ttk.Frame(dlg)
+        btns.pack(fill="x", padx=10, pady=(0, 10))
+        btns.grid_columnconfigure(0, weight=1)
+        btns.grid_columnconfigure(1, weight=1)
+
+        def _apply_and_close():
+            try:
+                vals = [float(ent.get()) for ent in entries]
+                if any(v <= 0 for v in vals):
+                    raise ValueError
+            except Exception:
+                messagebox.showerror("Layer turns", "Please enter numeric values > 0.", parent=dlg)
+                return
+            self._layer_turns = vals
+            self.var_layer_turns_summary.set(self._format_layer_turns_summary())
+            dlg.destroy()
+
+        ttk.Button(btns, text="Cancel", command=dlg.destroy).grid(row=0, column=0, sticky="e", padx=4)
+        ttk.Button(btns, text="OK", command=_apply_and_close).grid(row=0, column=1, sticky="w", padx=4)
+
     # --- helpers to read and validate inputs ---
     def _read_inputs(self) -> SpiralInputs:
         try:
@@ -750,13 +962,19 @@ class SpiralApp(tk.Tk):
             raise ValueError("Please enter valid positive numbers (S can be 0).")
 
         self._ensure_layer_dir_length(M)
+        self._ensure_layer_arms_length(M, K)
+        self._ensure_layer_turns_length(M, N)
         layer_dirs = list(self._layer_dirs)
+        layer_arms = list(self._layer_arms)
+        layer_turns = list(self._layer_turns)
 
         return SpiralInputs(
             Dout_mm=Dout, W_mm=W, S_mm=S, N_turns=N, K_arms=K, M_layers=M, dz_mm=dz,
             base_phase_deg=base, twist_per_layer_deg=twist, pts_per_turn=pts,
             layer_gaps_mm=dz_list,
             layer_dirs=layer_dirs,
+            layer_arms=layer_arms,
+            layer_turns=layer_turns,
         )
 
     def _read_header(self) -> SimHeader:

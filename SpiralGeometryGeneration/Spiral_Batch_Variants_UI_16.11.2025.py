@@ -252,6 +252,7 @@ class BatchApp(tk.Tk):
         self.var_base = tk.StringVar(value="0.0")
         self.var_twist= tk.StringVar(value="0.0")
         self.var_layer_dir_summary = tk.StringVar(value="All layers: CCW")
+        self.var_layer_kn_summary  = tk.StringVar(value="All layers use global K/N ranges")
 
         # Sampling density — take the constant from the original module if present
         default_pts = getattr(self.SDU, "PTS_PER_TURN", 50)
@@ -268,6 +269,8 @@ class BatchApp(tk.Tk):
         # Internal state
         self._building = False
         self._layer_dirs: List[str] = []
+        self._layer_K_overrides: List[Optional[int]] = []
+        self._layer_N_overrides: List[Optional[float]] = []
         self._extra_layer_configs: List[LayerConfig] = []
         self.var_M.trace_add("write", self._on_layers_changed)
         self._on_layers_changed()
@@ -378,8 +381,34 @@ class BatchApp(tk.Tk):
             M = int(self.var_M.get())
         except Exception:
             M = 0
-        self._ensure_layer_dir_length(M)
+        # Maintain any state that depends on the layer count. Older builds
+        # referenced _ensure_layer_kn_length, so keep the compatibility hook
+        # while delegating to the existing direction/config length guard.
+        self._ensure_layer_kn_length(M)
         self.var_layer_dir_summary.set(self._format_layer_dir_summary())
+        self.var_layer_kn_summary.set(self._format_layer_kn_summary())
+
+    def _ensure_layer_kn_length(self, M: int):
+        """
+        Backward-compatible wrapper to keep per-layer state sized correctly.
+
+        Earlier revisions called this helper during M changes; the current
+        implementation keeps the per-layer override arrays sized alongside the
+        direction/config state so callers from either name succeed.
+        """
+        M = max(0, int(M))
+        self._ensure_layer_kn_slots()
+
+        def _resize(seq: list, fill):
+            if len(seq) < M:
+                seq.extend([fill] * (M - len(seq)))
+            elif len(seq) > M:
+                del seq[M:]
+            return seq
+
+        self._layer_K_overrides = _resize(list(self._layer_K_overrides), None)
+        self._layer_N_overrides = _resize(list(self._layer_N_overrides), None)
+        self._ensure_layer_dir_length(M)
 
     def _ensure_layer_dir_length(self, M: int):
         M = max(0, int(M))
@@ -401,6 +430,34 @@ class BatchApp(tk.Tk):
             return f"All layers: {val}"
         preview = ", ".join(f"L{idx}:{val}" for idx, val in enumerate(self._layer_dirs))
         return f"Layer dirs → {preview}"
+
+    def _format_layer_kn_summary(self) -> str:
+        self._ensure_layer_kn_slots()
+        if not self._layer_K_overrides and not self._layer_N_overrides:
+            return "All layers use global K/N ranges"
+
+        def _override_str(label: str, overrides: list[Optional[object]]):
+            existing = [(idx, val) for idx, val in enumerate(overrides) if val is not None]
+            if not existing:
+                return None
+            previews = ", ".join(f"L{idx}:{val}" for idx, val in existing)
+            return f"{label} overrides → {previews}"
+
+        parts = []
+        k_part = _override_str("K", self._layer_K_overrides)
+        n_part = _override_str("N", self._layer_N_overrides)
+        if k_part:
+            parts.append(k_part)
+        if n_part:
+            parts.append(n_part)
+        return "; ".join(parts) if parts else "All layers use global K/N ranges"
+
+    def _ensure_layer_kn_slots(self):
+        """Guarantee K/N override containers exist even if called before __init__."""
+        if not hasattr(self, "_layer_K_overrides"):
+            self._layer_K_overrides = []
+        if not hasattr(self, "_layer_N_overrides"):
+            self._layer_N_overrides = []
 
     def _format_cfg_summary(self) -> str:
         total = 1 + len(self._extra_layer_configs)

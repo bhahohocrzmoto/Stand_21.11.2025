@@ -29,6 +29,7 @@ import os
 import sys
 import importlib
 import importlib.util
+import shutil
 from dataclasses import dataclass
 from decimal import Decimal, getcontext
 from pathlib import Path
@@ -632,6 +633,7 @@ class BatchApp(tk.Tk):
         done = 0
         skipped = 0
         outdirs: List[Path] = []
+        not_created: List[str] = []
 
         for per_layer in combos_per_layer:
             # per_layer is tuple of (K, N, dir) for each layer
@@ -654,7 +656,6 @@ class BatchApp(tk.Tk):
             else:
                 outdir.mkdir(parents=True, exist_ok=True)
                 txt_path = outdir / "Wire_Sections.txt"
-                outdirs.append(outdir)
 
                 params = SpiralInputs(
                     Dout_mm=geom["Dout"],
@@ -684,10 +685,17 @@ class BatchApp(tk.Tk):
                         box=BOX_MODE,
                         section_dirs=dirs,
                     )
+                    outdirs.append(outdir)
                     self._log(f"OK  → {subname}/Wire_Sections.txt  (Sections={len(arms_xy)})")
                 except Exception as exc:
                     skipped += 1
+                    not_created.append(subname)
                     self._log(f"ERR → {subname}  ({exc})")
+                    if outdir.exists():
+                        try:
+                            shutil.rmtree(outdir)
+                        except Exception as cleanup_exc:
+                            self._log(f"Cleanup failed for {subname}: {cleanup_exc}")
 
             done += 1
             if self.prog is not None:
@@ -697,6 +705,10 @@ class BatchApp(tk.Tk):
         # Address.txt in mother folder
         write_address_file(mother, outdirs)
         ok, msg = verify_address_file(mother, outdirs)
+        if not_created:
+            not_created_path = mother / "NotCreated.txt"
+            not_created_path.write_text("\n".join(not_created), encoding="utf-8")
+            self._log(f"Recorded {len(not_created)} not-created variant(s) → {not_created_path.name}")
         if ok:
             messagebox.showinfo("Generation complete", msg, parent=self)
         else:

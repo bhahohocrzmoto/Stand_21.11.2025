@@ -185,7 +185,8 @@ def _convert_directory(directory: Path, settings: ConversionSettings) -> None:
     _, cap_sections = fastcap.parse_wire_sections(wire_sections)
     fastcap.write_fastcap_file(fastcap_output, cap_sections, settings.trace_width_mm)
 
-    print(f"[OK] Converted {directory.name} → {fasthenry_output.name}, {fastcap_output.name}")
+    # Use ASCII arrow to avoid UnicodeEncodeError on Windows console codepages
+    print(f"[OK] Converted {directory.name} -> {fasthenry_output.name}, {fastcap_output.name}")
 
 
 def build_parser() -> argparse.ArgumentParser:
